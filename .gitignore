@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+
+# Never commit key material or issued keys
+authority.key
+authority.pub
+user.key.json
+*.key
+*.pem
+.env
