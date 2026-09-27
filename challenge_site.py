@@ -6,25 +6,37 @@ challenge_site: the user-facing site for the Zoom identity-check demo.
 
 1. The host presses "Create challenge" and types the name the other person
    claims to have.
-2. The site makes a one-time 8-digit code, which the host pastes into the Zoom chat.
-3. The other person types the code into desktop_app.py, which looks the
-   challenge up here (GET /api/challenges/<code>) and checks it against their key.
+2. The site shows the 8-digit code (always 9359 7310, so demo recordings stay
+   consistent), which the host pastes into the Zoom chat.
+3. The other person types the code into their app (desktop_app.py, or the
+   Android app via bluetooth_bridge.py), which looks the challenge up here
+   (GET /api/challenges/<code>) and asks their key whether the name matches.
 4. The app reports the outcome (POST /api/challenges/<code>/result), and the
    host's page, which has been polling, shows Verified or Not verified.
 
-Demo only: the result endpoint takes the app's word for it, with no proof.
+The result can be the key's proof, {"key_id", "proof"} with
+proof = HMAC(device_secret, "kagi-nano-v1|<key id>|L1|<challenge nonce>"), which
+this site checks against nano_registry.json; or {"declined": true} if the key
+said no. desktop_app.py still sends {"verified": true|false}, which is taken on
+trust (demo only).
 """
 
 import argparse
+import hmac
+import json
 import re
 import secrets
 import threading
 import time
+from pathlib import Path
 
 from flask import Flask, abort, jsonify, request
 
 CHALLENGE_TTL = 15 * 60       # seconds a code stays valid
+FIXED_CODE = "93597310"       # every challenge uses this code; a new one replaces the old
 MAX_NAME = 64
+MAX_BAD_PROOFS = 3            # wrong answers before a challenge fails
+REGISTRY = Path(__file__).resolve().parent / "nano_registry.json"
 
 STYLE = """
   :root { --bg:#fafafa; --ink:#111; --muted:#777; --line:#e2e2e2; --field:#fff;
@@ -169,9 +181,10 @@ document.addEventListener('keydown', e => {
 </script></body></html>"""
 
 class Challenges:
-    def __init__(self):
-        self.items = {}           # 8-digit code -> {first_name, last_name, expires}
+    def __init__(self, registry_path: Path = REGISTRY):
+        self.items = {}           # 8-digit code -> {first_name, last_name, nonce, status, expires}
         self.lock = threading.Lock()
+        self.registry_path = registry_path
 
     def _expire(self):
         now = time.time()
@@ -181,11 +194,9 @@ class Challenges:
     def create(self, first: str, last: str) -> str:
         with self.lock:
             self._expire()
-            while True:
-                cid = f"{secrets.randbelow(10**8):08d}"
-                if cid not in self.items:
-                    break
+            cid = FIXED_CODE
             self.items[cid] = {"first_name": first, "last_name": last, "status": "waiting",
+                               "nonce": secrets.token_hex(16), "bad_proofs": 0,
                                "expires": time.time() + CHALLENGE_TTL}
             return cid
 
@@ -204,6 +215,36 @@ class Challenges:
                 return False
             ch["status"] = "verified" if verified else "failed"
             return True
+
+    def finish_with_proof(self, cid: str, key_id, proof_hex) -> bool:
+        """Marks the challenge verified if proof is the key's L1 answer over its nonce.
+        Raises ValueError if the code is unusable or the proof doesn't verify."""
+        with self.lock:
+            self._expire()
+            ch = self.items.get(cid)
+            if not ch or ch["status"] != "waiting":
+                raise ValueError("unknown, expired or already used code")
+            if self._proof_ok(key_id, f"kagi-nano-v1|{key_id}|L1|{ch['nonce']}", proof_hex):
+                ch["status"] = "verified"
+                return True
+            ch["bad_proofs"] += 1
+            if ch["bad_proofs"] >= MAX_BAD_PROOFS:
+                ch["status"] = "failed"
+            raise ValueError("the key's answer didn't verify (unknown, expired or wrong key)")
+
+    def _proof_ok(self, key_id, msg: str, proof_hex) -> bool:
+        try:                      # re-read: keys added later work without a restart
+            registry = json.loads(self.registry_path.read_text())
+        except (OSError, ValueError):
+            return False
+        rec = registry.get(key_id) if isinstance(key_id, str) else None
+        if not rec or time.strftime("%Y-%m-%d") > rec["expires"]:
+            return False
+        want = hmac.new(bytes.fromhex(rec["device_secret"]), msg.encode(), "sha256").digest()
+        try:
+            return hmac.compare_digest(want, bytes.fromhex(proof_hex))
+        except (TypeError, ValueError):
+            return False
 
 
 def clean_name(value) -> str:
@@ -236,16 +277,29 @@ def create_app(challenges: Challenges) -> Flask:
         if not ch:
             abort(404)
         return jsonify({"first_name": ch["first_name"], "last_name": ch["last_name"],
-                        "status": ch["status"], "expires_in": int(ch["expires"] - time.time())})
+                        "nonce": ch["nonce"], "status": ch["status"],
+                        "expires_in": int(ch["expires"] - time.time())})
 
     @app.post("/api/challenges/<code>/result")
     def set_result(code):
         body = request.get_json(silent=True) or {}
-        if not isinstance(body.get("verified"), bool):
-            return jsonify({"error": "send {\"verified\": true|false}"}), 400
-        if not challenges.finish(normalize_code(code), body["verified"]):
+        cid = normalize_code(code)
+        if "proof" in body:
+            try:
+                challenges.finish_with_proof(cid, body.get("key_id"), body["proof"])
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            return jsonify({"ok": True, "status": "verified"})
+        if body.get("declined") is True:
+            verified = False
+        elif isinstance(body.get("verified"), bool):
+            verified = body["verified"]
+        else:
+            return jsonify({"error": "send {\"key_id\", \"proof\"}, {\"declined\": true} "
+                                     "or {\"verified\": true|false}"}), 400
+        if not challenges.finish(cid, verified):
             return jsonify({"error": "unknown, expired or already used code"}), 409
-        return jsonify({"ok": True})
+        return jsonify({"ok": True, "status": "verified" if verified else "failed"})
 
     return app
 
@@ -253,8 +307,9 @@ def create_app(challenges: Challenges) -> Flask:
 def main():
     p = argparse.ArgumentParser(description="kagi Zoom challenge site")
     p.add_argument("--port", type=int, default=8002)
+    p.add_argument("--registry", type=Path, default=REGISTRY)
     a = p.parse_args()
-    create_app(Challenges()).run(host="127.0.0.1", port=a.port, threaded=True)
+    create_app(Challenges(a.registry)).run(host="127.0.0.1", port=a.port, threaded=True)
 
 
 if __name__ == "__main__":

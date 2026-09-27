@@ -189,16 +189,15 @@ No name is needed. After the tap:
 
 ### 3.3 Age check (`type: "age_check"`)
 
-Show: **"<site_name> wants to check you're <over> or over."** Ask for the
-user's **first and last name**. The name goes only to the key, and is never
-sent over Bluetooth. The key checks name + "over <over>".
+Show: **"<site_name> wants to check you're <over> or over. Tap your key."**
+No name or other input is needed; the key answers "over <over>?" by itself.
 
 - **Key says yes:** `POST /api/challenges/<code>/response`, body
   `{"key_id":"…","proof":"<AUTH proof for scope OVER18 or OVER21, §4>"}` → `200 {"status":"complete","result":"verified"}`.
   Show ✓ **Verified <over>+**: "<site_name> now knows you're <over> or over. Nothing else."
-- **Key says no** (wrong name, or under age): `POST …/response`, body
+- **Key says no** (under age): `POST …/response`, body
   `{"declined":true}` → `200 {"status":"complete","result":"declined"}`.
-  Show ✗ **Not verified**: "Your key couldn't confirm you're <over> or over. Check how you spelled your name."
+  Show ✗ **Not verified**: "Your key says you're not <over> or over."
 - `400 {"error": …}`: as in 3.2.
 
 The central server checks the proof itself, so the site's "verified" can be
@@ -305,8 +304,8 @@ here. Tell the PC side what they are, or have it generate them for the card.
 6. **PC selection:** list `bondedDevices` by name, remember the chosen MAC.
    Settings: change PC, optional manual RFCOMM channel (§1 fallback), and a
    debug toggle for TCP `127.0.0.1:8766`.
-7. **Privacy:** the user's name (age check) goes only to the key, never over
-   Bluetooth. Never log or store codes, nonces, proofs or `device_secret`.
+7. **Privacy:** no personal data goes over Bluetooth. Never log or store
+   codes, nonces, proofs or `device_secret`.
 8. **Strict parsing:** ignore unknown fields; treat a missing/unknown `status`
    or `type` as an error.
 

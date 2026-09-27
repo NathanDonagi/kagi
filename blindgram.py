@@ -12,9 +12,9 @@ site asks the central server for a 12-digit code, you type it into the desktop
 app and plug in your key, and the site hears back only "new" (account created)
 or "existing" (you already have one; one per person).
 
-Reels are 18+: the site asks for an age check the same way. You type your name
-into the desktop app (it goes only to your key), the key answers "over 18?",
-and the central server checks the key's proof. The site hears only yes or no,
+Reels are 18+: the site asks for an age check the same way. You type the code
+into the desktop app and plug in your key, the key answers "over 18?", and the
+central server checks the key's proof. The site hears only yes or no,
 and remembers "age verified" on your account.
 
 Blindgram never learns anyone's name, birthday or key id. Log-in after sign-up
@@ -737,7 +737,7 @@ $('go').onclick = async () => {
   try {
     await kagiCheck('/api/age/start', {},
       {title: 'Verify your age', sub: 'Blindgram will learn only yes or no.',
-       step3: 'Type your name and plug in your key'},
+       step3: 'Plug in your key'},
       s => {
         if (s.status === 'verified')
           showResult(true, 'You\'re verified', 'Your account is now 18+ verified. Enjoy Reels.',

@@ -18,9 +18,8 @@ Flow
                        the challenge is then deleted
 
 Age checks use the same five steps with {"type": "age_check", "over": 18} in
-step 1. At step 3 the app asks the key AUTH <nonce> first_name=..;last_name=..;over=18
-(the user types their name into the app; it goes only to the key), and at step 4
-it relays the key's proof, HMAC(device_secret, "kagi-nano-v1|key id|OVER18|nonce"),
+step 1. At step 3 the app asks the key AUTH <nonce> over=18 (no name needed),
+and at step 4 it relays the key's proof, HMAC(device_secret, "kagi-nano-v1|key id|OVER18|nonce"),
 or {"declined": true} if the key said no. The website gets "verified" or "failed".
 
 What each party learns
@@ -68,6 +67,8 @@ MAX_BAD_PROOFS = 3        # wrong answers before a challenge is burnt
 MARK_SCRYPT_N = 2**17     # ~128 MiB, ~0.25 s per guess
 AGE_THRESHOLDS = (18, 21) # what the key can answer
 SITE_ID = re.compile(r"[a-z0-9.-]{1,64}")
+FIXED_CODES = {"blindgram": "744915652364"}  # testing: the site always gets this code,
+                                             # and a new challenge replaces the old one
 
 
 # ---------- persistent state ----------
@@ -139,10 +140,11 @@ class CentralServer:
     def new_challenge(self, site_id: str, kind: str = "unique_signup", over: int = None) -> str:
         with self.lock:
             self._expire()
-            while True:
+            code = FIXED_CODES.get(site_id)
+            while code is None:
                 code = f"{secrets.randbelow(10**12):012d}"
-                if code not in self.challenges:
-                    break
+                if code in self.challenges or code in FIXED_CODES.values():
+                    code = None
             self.challenges[code] = {
                 "type": kind, "over": over, "site_id": site_id, "nonce": secrets.token_hex(16),
                 "expires": time.time() + CODE_TTL, "state": "waiting", "result": None,

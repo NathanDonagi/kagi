@@ -6,6 +6,8 @@ authority.key
 authority.pub
 user.key.json
 nano_registry.json
+kagi_nano_minor/
+random/
 central_data/
 website_credentials.json
 blindgram_credentials.json

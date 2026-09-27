@@ -237,11 +237,10 @@ def run_demo(nano, verifier):
         ("L2: wrong ssn", {**full, "ssn": "999999999"}, None),
         ("L2: wrong first name", {**full, "first_name": "Nate"}, None),
         ("pin with no ssn", {**name, "pin": DEMO["pin"]}, None),
-        (f"over 18 (age {age})", {**name, "over": 18}, "OVER18" if age >= 18 else None),
-        (f"over 21 (age {age})", {**name, "over": 21}, "OVER21" if age >= 21 else None),
-        ("over 18, wrong name", {"first_name": "Nathan", "last_name": "Smith", "over": 18}, None),
-        ("over 18 + extra field", {**name, "over": 18, "dob": DEMO["dob"]}, None),
-        ("over 25 (unsupported)", {**name, "over": 25}, None),
+        (f"over 18 (age {age}), no name", {"over": 18}, "OVER18" if age >= 18 else None),
+        (f"over 21 (age {age}), no name", {"over": 21}, "OVER21" if age >= 21 else None),
+        ("over 18 + name (over stands alone)", {**name, "over": 18}, None),
+        ("over 25 (unsupported)", {"over": 25}, None),
         ("L2: everything correct (resets failure counter)", full, "L2"),
     ]
     failed = 0

@@ -40,6 +40,7 @@ The project has four layers:
   - [Comparing the two](#comparing-the-two)
 - [Part 4: Name checks on a video call](#part-4-name-checks-on-a-video-call)
 - [The desktop app](#the-desktop-app)
+- [The Android app over Bluetooth](#the-android-app-over-bluetooth)
 - [Security review](#security-review)
 - [Threat model](#threat-model)
 - [Known limitations](#known-limitations)
@@ -62,6 +63,8 @@ The project has four layers:
 | `phone_app.py` | The user's app: enter the code, tap the key, relay the answer |
 | `desktop_app.py` | The user's app with a Qt UI: Zoom name checks (8-digit codes) and website sign-up / age checks (12-digit codes) |
 | `serial_bridge.py` | Run with Windows Python under WSL: forwards the Nano's COM port to `desktop_app.py` over localhost |
+| `bluetooth_bridge.py` | Run with Windows Python: lets the Android app (the phone version of `desktop_app.py`, with an RFID key) reach the central server and challenge site over Bluetooth |
+| `communication.md` | The Bluetooth protocol spec for the Android app |
 | `challenge_site.py` | Zoom name-check site (Flask): the host creates a challenge and watches for the result |
 | `blindgram.py` | Instagram-style demo site: one account per person at sign-up, Reels gated behind an 18+ check |
 
@@ -90,7 +93,8 @@ pip install -r requirements.txt       # cryptography, pyserial, flask, PyQt5
 
 Default ports: central server **8000**, `website.py` **8001**,
 `challenge_site.py` **8002**, `blindgram.py` **8003**, and `desktop_app.py`
-listens on **8765** for `serial_bridge.py` under WSL. Every server takes `--port`.
+listens on **8765** for `serial_bridge.py` under WSL. `bluetooth_bridge.py --tcp`
+uses **8766** by convention. Every server takes `--port`.
 
 ### Python only (no hardware)
 
@@ -113,7 +117,7 @@ python3 nano_provision.py --first-name Nathan --last-name Donagi \
 # 3. Ask it questions from the PC.
 python3 nano_client.py info
 python3 nano_client.py demo                                       # 23 test queries
-python3 nano_client.py verify first_name=Nathan last_name=Donagi over=21
+python3 nano_client.py verify over=21                                    # no name needed
 python3 nano_client.py shell                                      # interactive
 ```
 
@@ -154,6 +158,15 @@ python3 desktop_app.py                 # the other person types the 8-digit code
 
 Under WSL, also run `py serial_bridge.py` with **Windows** Python so the desktop
 app can reach the Nano.
+
+### Android app (over Bluetooth)
+
+```bash
+python3 central_server.py serve        # + blindgram.py and/or challenge_site.py as above
+py bluetooth_bridge.py                 # Windows Python, Bluetooth on, phone paired
+```
+
+The phone app then answers the codes those sites show, with an RFID key.
 
 ---
 
@@ -319,7 +332,7 @@ C = PBKDF2-HMAC-SHA256( SHA256(json(parts)), salt, 200 iterations )
 full_name  ["L1","full_name",[first,last]]
 dob        ["L1","dob",[first,last],"YYYY-MM-DD"]             chained on the name
 ssn        ["L2","ssn",[first,last],dob,pin,ssn]               covers everything
-over T     ["OVER",T,[first,last]]   or 64 random bytes if under T (decoy)
+over T     ["OVER",T]                or 64 random bytes if under T (decoy)
 ```
 
 Each query is checked against its single most specific commitment (for
@@ -337,14 +350,15 @@ value). This gives the same answer as checking each level, for a third of the wo
 | anything malformed | `ERR <reason>` |
 
 - Query keys: `first_name`, `last_name`, `dob` (`YYYY-MM-DD` or `MM/DD/YYYY`),
-  `ssn`, `pin`, `over`. The query kinds and rules are the same as in Part 1.
+  `ssn`, `pin`, `over`. The query kinds and rules are the same as in Part 1,
+  except that an over query is just `over=18` or `over=21`, with no name.
 - `AUTH` proof = `HMAC(device_secret, "kagi-nano-v1|<key id>|<scope>|<challenge>")`.
   The PC sends a fresh random challenge each time, so a recorded answer can't be
   replayed and nothing without the device secret can fake one.
 - `SIGN` proof = `HMAC(device_secret, "kagi-nano-sign-v1|<key id>|<site_id>|<nonce>")`
   (used by Part 3b).
 - It also works by hand from the Arduino Serial Monitor (Newline line ending):
-  `AUTH - first_name=Nathan;last_name=Donagi;over=21` (`-` means no challenge).
+  `AUTH - first_name=Nathan;last_name=Donagi` or `AUTH - over=21` (`-` means no challenge).
 
 `nano_client.py` wraps this: it generates the challenge, checks the proof against
 `nano_registry.json`, and checks the key's expiry (the Nano has no clock).
@@ -358,7 +372,8 @@ attempt is counted *before* the check runs, so cutting power mid-check doesn't
 dodge it. A correct level-2 query (which needs the PIN) resets the counter;
 other correct answers don't count as failures. Malformed queries (first name
 alone, unknown fields) are refused without testing anything, so they don't count.
-Provisioning a new key resets the counter.
+Over queries have no secret input, so there is nothing to guess: they skip the
+lockout entirely and never count. Provisioning a new key resets the counter.
 
 ### Tap button (optional)
 
@@ -378,6 +393,11 @@ phone app asks you to press Enter instead.
   authority shares with verifiers through `nano_registry.json`. This is
   symmetric: anyone holding the registry could also impersonate the key.
 - **Date of birth instead of age.** Over-18/21 flags are still fixed at issuance.
+- **Over queries need no name.** `over=18` alone gets an answer, so a
+  website's age check asks the user for nothing. The trade-off: whoever holds
+  the key can prove its owner's age bracket without knowing who they are, and
+  anyone who dumps the flash learns it with one PBKDF2 per threshold. In
+  `kagi.py`, where the key file itself is readable, the name stays required.
 - **Names are ASCII only** (no `"` or `\`), so the on-chip JSON needs no escaping.
 
 ### How the Nano code was tested
@@ -565,9 +585,9 @@ comments, posting, profiles, Reels) that uses the central server twice:
   and plugs in the key. Blindgram gets `new` (account created) or `existing`
   ("You already have an account"). Later log-ins are a plain username and password.
 - **Reels are 18+.** The site asks the central server for an `age_check`
-  challenge (`{"type": "age_check", "over": 18}`). The desktop app asks the user
-  for their name, which goes only to the key, and sends
-  `AUTH <server nonce> first_name=..;last_name=..;over=18`. It relays the key's
+  challenge (`{"type": "age_check", "over": 18}`). The user types the code into
+  the desktop app and plugs in the key; the app sends `AUTH <server nonce> over=18`
+  (no name needed). It relays the key's
   proof, `HMAC(device_secret, "kagi-nano-v1|key id|OVER18|nonce")`, and
   the **central server checks it**, so a modified app can't claim a yes it
   didn't get. Blindgram gets `verified` or `failed` and stores a single
@@ -639,16 +659,20 @@ On a Zoom call you can't tell whether "Nathan Donagi" is really Nathan Donagi.
 ```
 
 Codes are 8 random digits, valid for 15 minutes, and can be answered once. The
-site keeps challenges in memory only. The name is typed by the host, not the
+site keeps challenges in memory only. Each challenge also carries a random
+`nonce`. An app can answer with the key's proof over it,
+`HMAC(device_secret, "kagi-nano-v1|<key id>|L1|<nonce>")`, which the site checks
+against `nano_registry.json` (3 wrong proofs fail the code), or with
+`{"declined": true}`. The Android app does this. The name is typed by the host, not the
 person being checked, and only ever reaches their key as a yes/no question.
 
-**Limitation: this is a demo.** Unlike the central server, `challenge_site.py`
-takes the app's word for the result; nothing checks the key's proof on the
-server side, so a modified app could report `verified`. Fixing it means doing
-what the age check already does: the site issues the nonce, and it (or the
-central server) verifies the key's `AUTH` proof against the registry. Also,
-nothing ties the answering key to the person on camera; someone could hand
-their key and name to a friend.
+**Limitation: this is a demo.** `desktop_app.py` still checks the Nano's
+proof itself and then reports `{"verified": true|false}`, which the site
+accepts on trust, so a modified app could report `verified`. Switching it to
+send the proof over the site's nonce, as the Android app does, would close
+that gap; the site could then refuse the trust-based form. Also, nothing ties
+the answering key to the person on camera; someone could hand their key and
+name to a friend.
 
 ---
 
@@ -661,7 +685,7 @@ stands in for a phone app). You type a code, plug in the key, and see the result
 |---|---|---|
 | 8 digits | `challenge_site.py` | Asks the key whether the host's name matches (Part 4) |
 | 12 digits, `unique_signup` | `central_server.py` | Has the key `SIGN` the server's nonce and relays it (3b) |
-| 12 digits, `age_check` | `central_server.py` | Asks for your name (sent only to the key), relays the key's `OVER18` proof (3c) |
+| 12 digits, `age_check` | `central_server.py` | Asks the key "over 18?" (no name needed), relays its `OVER18` proof (3c) |
 
 The app waits for the key to be plugged in, and waits again if it is pulled out
 mid-check.
@@ -695,6 +719,38 @@ The bridge opens the port without asserting DTR, so the Nano isn't reset
 (and doesn't spend another 1–2 s in its bootloader). Under WSL the app also reads
 Windows' display scaling, light/dark setting and fonts, since WSLg passes none
 of them through.
+
+---
+
+## The Android app over Bluetooth
+
+The Android app (developed separately) is the phone version of
+`desktop_app.py`: the user types a code, taps an **RFID key**, and the app
+sends the key's answer. A phone can't reach `localhost` on the demo PC and
+there is no hosted server, so it talks to the PC over **Bluetooth Classic
+RFCOMM**. `bluetooth_bridge.py` accepts the connection and forwards each
+request to `central_server.py` or `challenge_site.py` over local HTTP. The full
+wire protocol and flows are in [`communication.md`](communication.md). In short:
+
+- Newline-delimited JSON. The bridge sends a `hello`, then answers each
+  `{"id", "target", "method", "path", "body"}` request with
+  `{"type": "response", "id", "status", "body"}`.
+- 12-digit codes: the app looks the challenge up on the central server and
+  posts `{key_id, proof}` (or `{"declined": true}`), exactly as `desktop_app.py`
+  does. 8-digit codes: the same against `challenge_site.py`.
+- The key's answers are the same HMACs the Nano produces, so an RFID key only
+  needs an entry in `nano_registry.json` for the servers to accept it.
+- The bridge only forwards GET/POST to `/api/...` paths and adds no
+  credentials, so the phone can answer codes but can't create them or read
+  results the way a website can.
+- Service UUID `083d2893-6eab-4283-b12c-cdf0771acb72`. On Windows the bridge
+  publishes an SDP record for it (via `WSASetService`), so the app connects by
+  UUID. It prints its RFCOMM channel as a fallback.
+- WSL has no Bluetooth, so the bridge runs with **Windows** Python (standard
+  library only) and reaches the servers in WSL through localhost forwarding.
+  On Linux with an adapter it runs directly, but publishes no SDP record.
+- `--tcp PORT` serves the same protocol over TCP on `127.0.0.1`, for the
+  Android emulator (`adb reverse tcp:8766 tcp:8766`) or testing.
 
 ---
 
@@ -794,8 +850,8 @@ account is theirs (in 3b, as long as it wasn't logging at the time).
     `unique_account.py` keeps everything in memory.
 12. **Stale facts.** Over-18/21 flags are fixed at issuance; keys expire after a
     year by default and must be re-issued.
-13. **The Zoom name check trusts the app.** `challenge_site.py` accepts the
-    app's `verified: true|false` without a proof (see [Part 4](#part-4-name-checks-on-a-video-call)).
+13. **The Zoom name check can trust the app.** `challenge_site.py` still accepts
+    `desktop_app.py`'s `verified: true|false` without a proof (see [Part 4](#part-4-name-checks-on-a-video-call)).
 14. **Age checks aren't bound to the account.** Any key that says 18+ can
     unlock Reels on any Blindgram account (see [3c](#3c-blindgram-sign-up-and-age-checks-on-a-social-site)).
 
@@ -852,3 +908,8 @@ account is theirs (in 3b, as long as it wasn't logging at the time).
     command-line phone app as the demo client, with a UI, a `--simulate` mode
     for rehearsing, and `serial_bridge.py` so it works under WSL.
     `challenge_site.py` added a name check for video calls.
+11. **Android over Bluetooth.** An Android version of the desktop app, with an
+    RFID key instead of the Nano. With no hosted server, `bluetooth_bridge.py`
+    relays its requests to the PC's servers over RFCOMM
+    ([`communication.md`](communication.md)), and `challenge_site.py` gained
+    server-side proof checking for it.

@@ -129,7 +129,7 @@ def build(first, last, dob, ssn, pin, iters, days, pkey):
     }
     for t in OVER_THRESHOLDS:
         # Unmet thresholds get random bytes: indistinguishable from real ones.
-        commitments[f"BK_C_OVER{t}"] = (entry(["OVER", t, name]) if age >= t
+        commitments[f"BK_C_OVER{t}"] = (entry(["OVER", t]) if age >= t
                                         else secrets.token_bytes(64))
 
     key_id, device_secret = secrets.token_bytes(12), secrets.token_bytes(32)

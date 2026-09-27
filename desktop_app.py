@@ -18,9 +18,8 @@ It takes two kinds of code:
 12 digits, from central_server.py (a website such as blindgram.py)
 * unique_signup: plug in the key; it signs the server's nonce for that site and
   the app relays the signature. The site learns only "new" or "existing".
-* age_check: type your name (it goes only to the key), plug in the key; it
-  answers "over 18?" over the server's nonce and the app relays the proof. The
-  site learns only yes or no. The central server checks both proofs itself,
+* age_check: plug in the key; it answers "over 18?" over the server's nonce
+  (no name needed) and the app relays the proof. The site learns only yes or no. The central server checks both proofs itself,
   so the app can't lie to it.
 
 WSL can't open serial ports, so under WSL the app listens on localhost:8765 and
@@ -404,9 +403,9 @@ def signup_flow(ch, keys, central, alive, say):
                                         "It allows one per person.")
 
 
-def age_flow(ch, fields, keys, central, alive, say):
+def age_flow(ch, keys, central, alive, say):
     site, over = ch["site_name"], ch["over"]
-    query = {**fields, "over": over}
+    query = {"over": over}
     try:
         answer = with_key(keys, lambda nano: (nano.key_id, *nano.auth(query, ch["nonce"])),
                           alive, say)
@@ -422,8 +421,7 @@ def age_flow(ch, fields, keys, central, alive, say):
         send_central(central, ch["code"], {"declined": True})
     except (NanoError, LookupError) as e:
         return False, "Not verified", str(e)
-    return False, "Not verified", (f"Your key couldn't confirm you're {over} or over. "
-                                   "Check how you spelled your name.")
+    return False, "Not verified", f"Your key says you're not {over} or over."
 
 
 # ---------- UI ----------
@@ -464,8 +462,6 @@ def run_ui(server: str, central: str, registry: dict, link, simulate: bool, them
                      padding:12px 16px; font-family:"{mono}"; font-size:30px; font-weight:600;
                      selection-background-color:{t['ink']}; selection-color:{t['bg']}; }}
         QLineEdit:focus {{ border-color:{t['ink']}; }}
-        QLineEdit#name {{ font-family:"{sans}"; font-size:16px; font-weight:400; }}
-        QLabel#note {{ color:{t['muted']}; font-size:14px; }}
         QPushButton#primary {{ background:{t['ink']}; color:{t['bg']}; border:none;
                                border-radius:24px; padding:14px 28px; font-weight:600; }}
         QPushButton#primary:disabled {{ background:{t['muted']}; }}
@@ -685,14 +681,17 @@ def run_ui(server: str, central: str, registry: dict, link, simulate: bool, them
             col.addWidget(card)
 
         def show_challenge(self, ch: dict):
-            if ch["type"] == "age_check":
-                return self.show_age_form(ch)
             col = self._page()
             if ch["type"] == "name_check":
                 col.addWidget(label("Someone is asking you to confirm", "muted"))
                 col.addSpacing(16)
                 self._card(col, (("First name", ch["first_name"]), ("Last name", ch["last_name"])))
                 flow = lambda alive, say: name_check_flow(ch, keys, server, alive, say)
+            elif ch["type"] == "age_check":
+                col.addWidget(label(f"{ch['site_name']} wants to check your age", "muted"))
+                col.addSpacing(16)
+                self._card(col, (("Question", f"{ch['over']} or over?"), ("They learn", "Yes or no")))
+                flow = lambda alive, say: age_flow(ch, keys, central, alive, say)
             else:
                 col.addWidget(label(f"{ch['site_name']} wants to check you're a unique person",
                                     "muted"))
@@ -700,55 +699,6 @@ def run_ui(server: str, central: str, registry: dict, link, simulate: bool, them
                 self._card(col, (("Site", ch["site_name"]), ("They learn", "New or existing")))
                 flow = lambda alive, say: signup_flow(ch, keys, central, alive, say)
             self._authenticate(col, flow)
-
-        def show_age_form(self, ch: dict):
-            col = self._page()
-            col.addWidget(label(f"{ch['site_name']} wants to check your age", "muted"))
-            col.addSpacing(16)
-            self._card(col, (("Question", f"{ch['over']} or over?"), ("They learn", "Yes or no")))
-            col.addSpacing(24)
-            first, last = QLineEdit(), QLineEdit()
-            for field, hint, value in ((first, "First name", self.remembered[0]),
-                                       (last, "Last name", self.remembered[1])):
-                field.setObjectName("name")
-                field.setPlaceholderText(hint)
-                field.setText(value)
-                field.setMaxLength(32)
-                col.addWidget(field)
-                col.addSpacing(8)
-            note = label("Your key needs your name to answer.\nIt goes to your key and nowhere else.",
-                         "note")
-            note.setWordWrap(True)
-            col.addWidget(note)
-            col.addSpacing(8)
-            self.error = label("", "error")
-            self.error.setMinimumHeight(28)
-            col.addWidget(self.error)
-            col.addSpacing(8)
-
-            def go():
-                fields = {"first_name": " ".join(first.text().split()),
-                          "last_name": " ".join(last.text().split())}
-                if not all(fields.values()):
-                    self.error.setText("Enter your first and last name.")
-                    return
-                self.remembered = (fields["first_name"], fields["last_name"])
-                self.show_age_check(ch, fields)
-            last.returnPressed.connect(go)
-            first.returnPressed.connect(last.setFocus)
-            col.addWidget(button("Continue", "primary", go))
-            col.addSpacing(4)
-            col.addWidget(button("Cancel", "text", self.show_code_screen), 0, Qt.AlignHCenter)
-            (last if self.remembered[0] else first).setFocus()
-
-        remembered = ("", "")       # the name from the last age check, only in memory
-
-        def show_age_check(self, ch: dict, fields: dict):
-            col = self._page()
-            col.addWidget(label(f"{ch['site_name']} wants to check your age", "muted"))
-            col.addSpacing(16)
-            self._card(col, (("Question", f"{ch['over']} or over?"), ("They learn", "Yes or no")))
-            self._authenticate(col, lambda alive, say: age_flow(ch, fields, keys, central, alive, say))
 
         def _authenticate(self, col, flow):
             """Spinner, headline and Cancel under the request; runs flow on a worker."""
