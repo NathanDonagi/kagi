@@ -5,6 +5,12 @@ __pycache__/
 authority.key
 authority.pub
 user.key.json
+nano_registry.json
+central_data/
+website_credentials.json
+blindgram_credentials.json
+blindgram_data/
+blindgram_media/
 *.key
 *.pem
 .env

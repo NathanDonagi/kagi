@@ -1,1 +1,4 @@
 cryptography>=42
+pyserial>=3.5
+flask>=3.0
+PyQt5>=5.15

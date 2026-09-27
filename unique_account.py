@@ -3,14 +3,14 @@
 unique_account: one account per person per website, with no way to link the
 account back to the person, and no personal data ever shown to the website.
 
-Protocol (Chaum RSA blind signatures, built on blindkey.py)
+Protocol (Chaum RSA blind signatures, built on kagi.py)
 -----------------------------------------------------------
 Setup   The central server registers each website and gives it a dedicated RSA
         key pair. The website gets the public half.
 
 Code    1. The user picks a random nonce and computes h = FDH(site_id || nonce).
         2. The user BLINDS it: b = h * r^e mod n, with a secret random r.
-        3. The user authenticates to the server with their blindkey key at
+        3. The user authenticates to the server with their kagi key at
            level 2 (name, age, SSN, PIN) and sends b for a given website.
         4. The server checks that this person has no code for that site yet,
            MARKS them as having one, and returns s' = b^d mod n.
@@ -56,7 +56,7 @@ import time
 
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from blindkey import Verifier, b64, normalize, unb64
+from kagi import Verifier, b64, normalize, unb64
 
 RSA_BITS = 2048
 MARK_SCRYPT_N = 2**17                       # ~128 MiB, ~0.25s per guess
@@ -84,7 +84,7 @@ class RefusedError(Exception):
 # ---------- Central server ----------
 
 class Issuer:
-    """Knows people (via their blindkey keys); signs blinded values, once per (person, site).
+    """Knows people (via their kagi keys); signs blinded values, once per (person, site).
 
     `pepper` is a long-term secret. It MUST be stored somewhere other than the
     database holding `_issued` (an HSM/KMS, ideally used as an HMAC oracle) and
@@ -242,7 +242,7 @@ def consistent(pub, site_id, transcript_entry, code) -> bool:
 
 
 def demo():
-    from blindkey import Authority
+    from kagi import Authority
     print("== demo ==")
     authority = Authority.generate()
     pepper = secrets.token_bytes(32)

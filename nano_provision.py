@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""
+nano_provision: the Authority for the Arduino Nano version of kagi.
+
+Computes the commitments for one person and writes them into the KEY DATA
+block of kagi_nano/kagi_nano.ino (the facts themselves are NOT written
+anywhere). Also adds the key to nano_registry.json, which the verifiers
+(nano_client.py, central_server.py) use to check the Nano's answers. Keep that
+file private: it holds device secrets.
+
+Each registry entry carries an opaque person id,
+    person = HMAC(authority_person.key, "person|" + ssn)
+so the central server can enforce one account per PERSON (a re-issued key for
+the same SSN maps to the same person) without ever seeing the SSN.
+authority_person.key is created on first run and must be kept (and kept secret).
+
+    python3 nano_provision.py --first-name Nathan --last-name Donagi \
+        --dob 2005-09-21 --ssn 123-45-6789 --pin 4821
+
+Then open kagi_nano/kagi_nano.ino in the Arduino IDE and upload it.
+
+Commitment format (must match the sketch):
+    C = PBKDF2-HMAC-SHA256(SHA256(json(parts)), salt, ITERS, 32)
+The Nano does ~200 iterations in about a second; scrypt (what kagi.py uses)
+needs 64 MiB of RAM and the Nano has 2 KiB. The lower cost is acceptable here
+because the commitments never leave the chip and guesses are rate limited.
+"""
+
+import argparse
+import datetime
+import hashlib
+import hmac
+import os
+import json
+import re
+import secrets
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKETCH = HERE / "kagi_nano" / "kagi_nano.ino"
+REGISTRY = HERE / "nano_registry.json"
+PERSON_KEY = HERE / "authority_person.key"
+BEGIN = "// ===== KEY DATA BEGIN"
+END = "// ===== KEY DATA END ====="
+OVER_THRESHOLDS = [18, 21]
+
+
+# ---------- normalization (identical to the sketch) ----------
+
+def norm_name(value: str) -> str:
+    if any(not (0x20 <= ord(ch) <= 0x7e or ch == "\t") or ch in '"\\' for ch in value):
+        raise ValueError("names must be plain ASCII without quotes or backslashes")
+    value = " ".join(value.split())
+    if not value or len(value) > 32:
+        raise ValueError("names must be 1-32 characters")
+    return value.lower()
+
+
+def norm_ssn(value: str) -> str:
+    value = re.sub(r"[\s-]", "", value)
+    if not re.fullmatch(r"\d{9}", value):
+        raise ValueError("ssn must be 9 digits")
+    return value
+
+
+def norm_pin(value: str) -> str:
+    value = value.strip()
+    if not re.fullmatch(r"\d{4}", value):
+        raise ValueError("pin must be exactly 4 digits")
+    return value
+
+
+def norm_dob(value: str) -> datetime.date:
+    m = re.fullmatch(r"\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s*", value)
+    if m:
+        y, mo, d = m.groups()
+    else:
+        m = re.fullmatch(r"\s*(\d{1,2})[-/](\d{1,2})[-/](\d{4})\s*", value)
+        if not m:
+            raise ValueError("dob must be YYYY-MM-DD or MM/DD/YYYY")
+        mo, d, y = m.groups()
+    return datetime.date(int(y), int(mo), int(d))
+
+
+# ---------- commitments ----------
+
+def commit(parts: list, salt: bytes, iters: int) -> bytes:
+    msg = json.dumps(parts, separators=(",", ":")).encode()
+    return hashlib.pbkdf2_hmac("sha256", hashlib.sha256(msg).digest(), salt, iters, 32)
+
+
+def age_on(dob: datetime.date, day: datetime.date) -> int:
+    return day.year - dob.year - ((day.month, day.day) < (dob.month, dob.day))
+
+
+def c_array(name: str, data: bytes) -> str:
+    rows = []
+    for i in range(0, len(data), 16):
+        rows.append("  " + ", ".join(f"0x{b:02x}" for b in data[i:i + 16]) + ",")
+    return (f"static const uint8_t {name}[{len(data)}] PROGMEM = {{\n"
+            + "\n".join(rows) + "\n};")
+
+
+def person_key(path: Path) -> bytes:
+    if not path.exists():
+        with open(path, "wb") as f:
+            os.fchmod(f.fileno(), 0o600)
+            f.write(secrets.token_bytes(32))
+    return path.read_bytes()
+
+
+def build(first, last, dob, ssn, pin, iters, days, pkey):
+    name = [norm_name(first), norm_name(last)]
+    dob_d = norm_dob(dob)
+    dob_s = dob_d.isoformat()
+    ssn, pin = norm_ssn(ssn), norm_pin(pin)
+    today = datetime.date.today()
+    age = age_on(dob_d, today)
+
+    def entry(parts):
+        salt = secrets.token_bytes(32)
+        return salt + commit(parts, salt, iters)
+
+    commitments = {
+        "BK_C_FULL_NAME": entry(["L1", "full_name", name]),
+        "BK_C_DOB": entry(["L1", "dob", name, dob_s]),
+        "BK_C_SSN": entry(["L2", "ssn", name, dob_s, pin, ssn]),
+    }
+    for t in OVER_THRESHOLDS:
+        # Unmet thresholds get random bytes: indistinguishable from real ones.
+        commitments[f"BK_C_OVER{t}"] = (entry(["OVER", t, name]) if age >= t
+                                        else secrets.token_bytes(64))
+
+    key_id, device_secret = secrets.token_bytes(12), secrets.token_bytes(32)
+    expires = today + datetime.timedelta(days=days)
+    yes = lambda t: "yes" if age >= t else "no"
+    block = "\n".join([
+        f"{BEGIN} (generated by nano_provision.py, do not edit) =====",
+        f"// Issued {today}, expires {expires}. Over 18: {yes(18)}, over 21: {yes(21)}"
+        " (decoys look identical).",
+        f"#define BK_KDF_ITERS {iters}",
+        c_array("BK_KEY_ID", key_id),
+        c_array("BK_DEVICE_SECRET", device_secret),
+        *(c_array(k, v) for k, v in commitments.items()),
+        END,
+    ])
+    verifier = {
+        "key_id": key_id.hex(),
+        "person": hmac.new(pkey, b"person|" + ssn.encode(), "sha256").hexdigest(),
+        "device_secret": device_secret.hex(),
+        "iters": iters,
+        "issued": today.isoformat(),
+        "expires": expires.isoformat(),
+    }
+    return block, verifier, age
+
+
+def main():
+    p = argparse.ArgumentParser(description="Provision a kagi Arduino Nano.")
+    for f in ("first-name", "last-name", "dob", "ssn", "pin"):
+        p.add_argument(f"--{f}", required=True)
+    p.add_argument("--iters", type=int, default=200,
+                   help="PBKDF2 iterations per commitment (~5 ms each on a Nano)")
+    p.add_argument("--days", type=int, default=365, help="validity in days")
+    p.add_argument("--sketch", type=Path, default=SKETCH)
+    p.add_argument("--registry", type=Path, default=REGISTRY)
+    p.add_argument("--person-key", type=Path, default=PERSON_KEY)
+    a = p.parse_args()
+    if not 1 <= a.iters <= 65535:
+        sys.exit("--iters must be between 1 and 65535")
+
+    try:
+        block, verifier, age = build(a.first_name, a.last_name, a.dob, a.ssn, a.pin,
+                                     a.iters, a.days, person_key(a.person_key))
+    except ValueError as e:
+        sys.exit(f"error: {e}")
+
+    src = a.sketch.read_text()
+    start, stop = src.find(BEGIN), src.find(END)
+    if start < 0 or stop < 0:
+        sys.exit(f"error: KEY DATA markers not found in {a.sketch}")
+    a.sketch.write_text(src[:start] + block + src[stop + len(END):])
+
+    registry = json.loads(a.registry.read_text()) if a.registry.exists() else {}
+    registry[verifier["key_id"]] = verifier
+    a.registry.write_text(json.dumps(registry, indent=2) + "\n")
+    a.registry.chmod(0o600)
+    print(f"wrote key into {a.sketch}")
+    print(f"added it to {a.registry} (KEEP PRIVATE: holds device secrets)")
+    print(f"key id {verifier['key_id']}, age {age} today, expires {verifier['expires']}")
+
+
+if __name__ == "__main__":
+    main()

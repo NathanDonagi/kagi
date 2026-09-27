@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-blindkey: a prototype "attribute-bound key" authentication protocol.
+kagi: a prototype "attribute-bound key" authentication protocol.
 
 An Authority issues a Key tied to a person's facts, but the Key reveals nothing
 about them. A holder can test guesses ("is the first name Nathan?") and get a
